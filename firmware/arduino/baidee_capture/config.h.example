@@ -1,2 +1,6 @@
 #define BAIDEE_WIFI_SSID "your-wifi-ssid"
 #define BAIDEE_WIFI_PASSWORD "your-wifi-password"
+#define BAIDEE_WORKER_URL "https://baidee-api.example.workers.dev/v1/ingest"
+#define BAIDEE_NODE_ID "bd-s01-b01-c01"
+#define BAIDEE_HMAC_SECRET "set-a-device-secret"
+#define BAIDEE_OTA_PASSWORD "set-an-ota-password"
