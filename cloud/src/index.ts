@@ -181,6 +181,14 @@ async function listCommands(request: Request, env: Env): Promise<Response> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/") {
+      return json({
+        service: "baidee-api",
+        status: "ok",
+        version: "0.1.0",
+        endpoints: ["/healthz", "/v1/ingest", "/v1/captures", "/v1/cmd"],
+      });
+    }
     if (request.method === "GET" && url.pathname === "/healthz") return json({ status: "ok" });
     if (request.method === "GET" && url.pathname === "/v1/captures") {
       try {
