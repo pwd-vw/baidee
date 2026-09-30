@@ -8,5 +8,5 @@
     "lib": ["ES2022"],
     "types": ["@cloudflare/workers-types"]
   },
-  "include": ["cloud/src/**/*.ts", "cloud/test/**/*.ts"]
+  "include": ["cloud/src/**/*.ts"]
 }

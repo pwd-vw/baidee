@@ -2,6 +2,7 @@ export interface Env {
   IMAGES: R2Bucket;
   DB: D1Database;
   BAIDEE_HMAC_SECRET: string;
+  BAIDEE_API_TOKEN?: string;
 }
 
 type CapturePayload = {
@@ -56,6 +57,16 @@ async function verifySignature(payload: string, signature: string | null, secret
   const expected = hexToBytes(signature);
   if (expected.length !== digest.length) return false;
   return digest.every((byte, index) => byte === expected[index]);
+}
+
+async function verifyApiToken(request: Request, token: string | undefined): Promise<boolean> {
+  if (!token) return false;
+  const authorization = request.headers.get("authorization");
+  if (!authorization?.startsWith("Bearer ")) return false;
+  const providedDigest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(authorization.slice(7))));
+  const expectedDigest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token)));
+  return providedDigest.length === expectedDigest.length
+    && providedDigest.every((byte, index) => byte === expectedDigest[index]);
 }
 
 function imageKey(payload: CapturePayload): string {
@@ -114,10 +125,71 @@ async function ingest(request: Request, env: Env): Promise<Response> {
   return json({ accepted: true, duplicate: false, capture_id: payload.capture_id });
 }
 
+async function listCaptures(request: Request, env: Env): Promise<Response> {
+  if (!(await verifyApiToken(request, env.BAIDEE_API_TOKEN))) return json({ error: "unauthorized" }, 401);
+  const url = new URL(request.url);
+  const node = url.searchParams.get("node");
+  const from = url.searchParams.get("from");
+  const to = url.searchParams.get("to");
+  const requestedLimit = Number(url.searchParams.get("limit") ?? 50);
+  const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(Math.trunc(requestedLimit), 1), 100) : 50;
+  const conditions: string[] = [];
+  const bindings: string[] = [];
+  if (node) {
+    conditions.push("node_id = ?");
+    bindings.push(node);
+  }
+  if (from) {
+    conditions.push("captured_at >= ?");
+    bindings.push(from);
+  }
+  if (to) {
+    conditions.push("captured_at <= ?");
+    bindings.push(to);
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const result = await env.DB.prepare(
+    `SELECT capture_id, node_id, site_id, bed_id, captured_at, stage, payload_json, image_key
+     FROM captures ${where} ORDER BY captured_at DESC LIMIT ?`,
+  ).bind(...bindings, limit).all<{
+    capture_id: string;
+    node_id: string;
+    site_id: string;
+    bed_id: string;
+    captured_at: string;
+    stage: string;
+    payload_json: string;
+    image_key: string;
+  }>();
+  return json({ captures: result.results.map((capture) => ({
+    ...capture,
+    payload: JSON.parse(capture.payload_json),
+    payload_json: undefined,
+  })) });
+}
+
+async function listCommands(request: Request, env: Env): Promise<Response> {
+  const node = new URL(request.url).searchParams.get("node");
+  const signature = request.headers.get("x-signature");
+  if (!node || !(await verifySignature(node, signature, env.BAIDEE_HMAC_SECRET))) {
+    return json({ error: "invalid node authentication" }, 401);
+  }
+  return json({ node_id: node, commands: [] });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/healthz") return json({ status: "ok" });
+    if (request.method === "GET" && url.pathname === "/v1/captures") {
+      try {
+        return await listCaptures(request, env);
+      } catch (error) {
+        console.error(JSON.stringify({ event: "captures_failed", error: String(error) }));
+        return json({ error: "could not list captures" }, 500);
+      }
+    }
+    if (request.method === "GET" && url.pathname === "/v1/cmd") return listCommands(request, env);
     if (request.method === "POST" && url.pathname === "/v1/ingest") {
       try {
         return await ingest(request, env);
