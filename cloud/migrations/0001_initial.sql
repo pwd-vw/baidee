@@ -9,6 +9,5 @@ CREATE TABLE IF NOT EXISTS captures (
   image_key TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
-
 CREATE INDEX IF NOT EXISTS idx_captures_node_time ON captures(node_id, captured_at DESC);
 CREATE INDEX IF NOT EXISTS idx_captures_bed_time ON captures(site_id, bed_id, captured_at DESC);

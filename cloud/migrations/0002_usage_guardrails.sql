@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS usage_daily (
+  usage_date TEXT PRIMARY KEY,
+  capture_count INTEGER NOT NULL DEFAULT 0,
+  image_bytes INTEGER NOT NULL DEFAULT 0
+);

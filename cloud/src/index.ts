@@ -17,7 +17,9 @@ type CapturePayload = {
   [key: string]: unknown;
 };
 
-const MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
+const MAX_DAILY_CAPTURES = 500;
+const MAX_DAILY_IMAGE_BYTES = 100 * 1024 * 1024;
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -69,9 +71,9 @@ async function verifyApiToken(request: Request, token: string | undefined): Prom
     && providedDigest.every((byte, index) => byte === expectedDigest[index]);
 }
 
-function imageKey(payload: CapturePayload): string {
+function imageKey(payload: CapturePayload, extension: "jpg" | "webp"): string {
   const date = payload.timestamp.slice(0, 10).replaceAll("-", "/");
-  return `raw/${payload.site_id}/${payload.bed_id}/${date}/${payload.capture_id}.jpg`;
+  return `raw/${payload.site_id}/${payload.bed_id}/${date}/${payload.capture_id}.${extension}`;
 }
 
 async function ingest(request: Request, env: Env): Promise<Response> {
@@ -83,6 +85,9 @@ async function ingest(request: Request, env: Env): Promise<Response> {
   const image = form.get("image");
   if (typeof payloadText !== "string" || !(image instanceof File)) {
     return json({ error: "multipart fields payload and image are required" }, 400);
+  }
+  if (!(["image/jpeg", "image/webp"] as string[]).includes(image.type)) {
+    return json({ error: "only image/jpeg and image/webp are accepted" }, 415);
   }
 
   let payload: unknown;
@@ -104,8 +109,19 @@ async function ingest(request: Request, env: Env): Promise<Response> {
     .first<{ capture_id: string }>();
   if (existing) return json({ accepted: true, duplicate: true, capture_id: payload.capture_id });
 
-  const key = imageKey(payload);
   const imageBytes = await image.arrayBuffer();
+  if (imageBytes.byteLength > MAX_UPLOAD_BYTES) return json({ error: "image too large" }, 413);
+  const usageDate = payload.timestamp.slice(0, 10);
+  const usage = await env.DB.prepare(
+    "SELECT capture_count, image_bytes FROM usage_daily WHERE usage_date = ?",
+  ).bind(usageDate).first<{ capture_count: number; image_bytes: number }>();
+  const captureCount = usage?.capture_count ?? 0;
+  const imageBytesUsed = usage?.image_bytes ?? 0;
+  if (captureCount >= MAX_DAILY_CAPTURES || imageBytesUsed + imageBytes.byteLength > MAX_DAILY_IMAGE_BYTES) {
+    return json({ error: "daily development ingest limit reached", usage_date: usageDate }, 429);
+  }
+  const extension = image.type === "image/webp" ? "webp" : "jpg";
+  const key = imageKey(payload, extension);
   await env.IMAGES.put(key, imageBytes, {
     httpMetadata: { contentType: image.type || "image/jpeg" },
     customMetadata: { capture_id: payload.capture_id, node_id: payload.node_id },
@@ -122,6 +138,9 @@ async function ingest(request: Request, env: Env): Promise<Response> {
     payloadText,
     key,
   ).run();
+  await env.DB.prepare(
+    "INSERT INTO usage_daily(usage_date, capture_count, image_bytes) VALUES (?, 1, ?) ON CONFLICT(usage_date) DO UPDATE SET capture_count = capture_count + 1, image_bytes = image_bytes + excluded.image_bytes",
+  ).bind(usageDate, imageBytes.byteLength).run();
 
   return json({ accepted: true, duplicate: false, capture_id: payload.capture_id });
 }

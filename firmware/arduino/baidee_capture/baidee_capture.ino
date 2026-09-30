@@ -36,9 +36,17 @@
 #define BAIDEE_OTA_PASSWORD ""
 #endif
 
+#ifndef BAIDEE_CAPTURE_INTERVAL_MS
+#define BAIDEE_CAPTURE_INTERVAL_MS (60UL * 60UL * 1000UL)
+#endif
+
+#ifndef BAIDEE_RETRY_INTERVAL_MS
+#define BAIDEE_RETRY_INTERVAL_MS (5UL * 60UL * 1000UL)
+#endif
+
 namespace {
-constexpr uint32_t CaptureIntervalMs = 60UL * 1000UL;
-constexpr uint32_t RetryIntervalMs = 30UL * 1000UL;
+constexpr uint32_t CaptureIntervalMs = BAIDEE_CAPTURE_INTERVAL_MS;
+constexpr uint32_t RetryIntervalMs = BAIDEE_RETRY_INTERVAL_MS;
 constexpr framesize_t CaptureFrameSize = FRAMESIZE_UXGA;
 constexpr uint8_t JpegQuality = 10;
 constexpr char PendingImagePath[] = "/pending.jpg";

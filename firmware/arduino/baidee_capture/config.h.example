@@ -4,3 +4,5 @@
 #define BAIDEE_NODE_ID "bd-s01-b01-c01"
 #define BAIDEE_HMAC_SECRET "set-a-device-secret"
 #define BAIDEE_OTA_PASSWORD "set-an-ota-password"
+#define BAIDEE_CAPTURE_INTERVAL_MS (60UL * 60UL * 1000UL)
+#define BAIDEE_RETRY_INTERVAL_MS (5UL * 60UL * 1000UL)
