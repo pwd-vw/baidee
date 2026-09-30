@@ -1,4 +1,18 @@
 #include "esp_camera.h"
+#include <WiFi.h>
+#include <time.h>
+
+#if __has_include("config.h")
+#include "config.h"
+#endif
+
+#ifndef BAIDEE_WIFI_SSID
+#define BAIDEE_WIFI_SSID ""
+#endif
+
+#ifndef BAIDEE_WIFI_PASSWORD
+#define BAIDEE_WIFI_PASSWORD ""
+#endif
 
 namespace {
 constexpr uint32_t CaptureIntervalMs = 60UL * 1000UL;
@@ -6,6 +20,8 @@ constexpr framesize_t CaptureFrameSize = FRAMESIZE_UXGA;
 constexpr uint8_t JpegQuality = 10;
 
 bool cameraReady = false;
+bool wifiReady = false;
+bool timeReady = false;
 uint32_t lastCaptureAt = 0;
 
 camera_config_t cameraConfig() {
@@ -53,6 +69,58 @@ bool initializeCamera() {
   return true;
 }
 
+bool networkConfigured() {
+  return BAIDEE_WIFI_SSID[0] != '\0';
+}
+
+bool syncUtcTime() {
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  const uint32_t startedAt = millis();
+  while (millis() - startedAt < 10000) {
+    const time_t now = time(nullptr);
+    if (now > 1700000000) return true;
+    delay(250);
+  }
+  return false;
+}
+
+void connectNetwork() {
+  if (!networkConfigured()) {
+    Serial.println("wifi=not_configured");
+    return;
+  }
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(BAIDEE_WIFI_SSID, BAIDEE_WIFI_PASSWORD);
+  Serial.printf("wifi_connecting ssid=%s\n", BAIDEE_WIFI_SSID);
+  const uint32_t startedAt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startedAt < 15000) {
+    delay(250);
+  }
+  wifiReady = WiFi.status() == WL_CONNECTED;
+  if (!wifiReady) {
+    Serial.printf("wifi=failed status=%d\n", WiFi.status());
+    return;
+  }
+
+  timeReady = syncUtcTime();
+  Serial.printf("wifi=ready ip=%s ntp=%s rssi=%d\n",
+    WiFi.localIP().toString().c_str(),
+    timeReady ? "ready" : "failed",
+    WiFi.RSSI());
+}
+
+void printHealth() {
+  String ip = wifiReady ? WiFi.localIP().toString() : "-";
+  Serial.printf("health camera=%s psram=%s wifi=%s ip=%s ntp=%s uptime_ms=%lu\n",
+    cameraReady ? "ready" : "failed",
+    psramFound() ? "available" : "missing",
+    wifiReady ? "ready" : (networkConfigured() ? "failed" : "not_configured"),
+    ip.c_str(),
+    timeReady ? "ready" : "not_ready",
+    static_cast<unsigned long>(millis()));
+}
+
 void captureFrame() {
   if (!cameraReady) return;
 
@@ -78,13 +146,12 @@ void processSerialCommands() {
   const String command = Serial.readStringUntil('\n');
   if (command.equalsIgnoreCase("capture")) {
     captureFrame();
+  } else if (command.equalsIgnoreCase("wifi")) {
+    connectNetwork();
   } else if (command.equalsIgnoreCase("health")) {
-    Serial.printf("health camera=%s psram=%s uptime_ms=%lu\n",
-      cameraReady ? "ready" : "failed",
-      psramFound() ? "available" : "missing",
-      static_cast<unsigned long>(millis()));
+    printHealth();
   } else {
-    Serial.println("commands=capture|health");
+    Serial.println("commands=capture|health|wifi");
   }
 }
 }
@@ -100,6 +167,7 @@ void setup() {
 
   cameraReady = initializeCamera();
   Serial.printf("camera=%s\n", cameraReady ? "ready" : "failed");
+  connectNetwork();
   captureFrame();
   lastCaptureAt = millis();
 }

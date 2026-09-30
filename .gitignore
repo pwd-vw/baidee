@@ -13,5 +13,6 @@ __pycache__/
 *.sqlite
 *.sqlite3
 *.egg-info/
+firmware/arduino/**/config.h
 .DS_Store
 dev_log/

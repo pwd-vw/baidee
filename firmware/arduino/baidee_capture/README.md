@@ -13,9 +13,12 @@ Target board: MB0184 ESP32-S3 CAM, ESP32-S3-WROOM-1-N16R8, OV3660.
 
 Upload `baidee_capture.ino`, then open Serial Monitor at `115200` baud. The firmware captures one JPEG at startup and every 60 seconds.
 
+Optional Wi-Fi/NTP setup is enabled by copying `config.h.example` to `config.h` and filling in the local network values. `config.h` is ignored by Git. Without it, the firmware remains usable in camera-only mode.
+
 Serial commands:
 
 - `health`: print camera, PSRAM, and uptime state
 - `capture`: capture one frame immediately
+- `wifi`: connect or reconnect and sync UTC time with NTP
 
 This is the Phase 1.1 hardware smoke test. It does not yet connect Wi-Fi, upload images, run triage, or configure OTA. Those behaviors are added after camera stability is proven.

@@ -13,4 +13,4 @@ Initial responsibilities:
 - retry and buffer when the network is unavailable;
 - expose OTA and watchdog hooks.
 
-The smoke test intentionally stops before Wi-Fi and upload integration. Confirm stable JPEG capture and PSRAM first, then add provisioning, UTC time, HMAC upload, retry queue, and OTA.
+The current smoke test includes optional Wi-Fi STA and UTC/NTP setup. Confirm stable JPEG capture and PSRAM first, then add provisioning, HMAC upload, retry queue, and OTA.

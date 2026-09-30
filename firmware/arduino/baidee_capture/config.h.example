@@ -1,0 +1,2 @@
+#define BAIDEE_WIFI_SSID "your-wifi-ssid"
+#define BAIDEE_WIFI_PASSWORD "your-wifi-password"
