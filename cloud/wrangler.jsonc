@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "baidee-api",
+  "account_id": "a1975d6f01f07f5f4fc8b8509d936003",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-30",
+  "observability": {
+    "enabled": true,
+    "traces": { "enabled": true }
+  },
+  "r2_buckets": [
+    { "binding": "IMAGES", "bucket_name": "baidee" }
+  ],
+  "d1_databases": [
+    { "binding": "DB", "database_name": "baidee", "database_id": "202de077-29c6-4d3e-b2cb-b3730f3f3573", "migrations_dir": "migrations" }
+  ]
+}

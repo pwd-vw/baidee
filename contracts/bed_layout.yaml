@@ -1,0 +1,15 @@
+schema_version: "1.0"
+site_id: s01
+bed_id: b01
+length_m: 20.0
+width_m: 1.0
+rows:
+  - row_id: rA
+    spacing_m: 0.30
+    y_m: 0.50
+zones:
+  - zone_id: z01
+    x_start_m: 0.0
+    x_end_m: 20.0
+    marker_family: tag36h11
+    marker_ids: [0, 1, 2, 3]

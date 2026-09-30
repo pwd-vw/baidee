@@ -1,0 +1,18 @@
+{
+  "name": "baidee",
+  "private": true,
+  "version": "0.1.0",
+  "description": "BaiDee leaf health monitoring platform",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "dev:cloud": "wrangler dev --config cloud/wrangler.jsonc",
+    "deploy:cloud": "wrangler deploy --config cloud/wrangler.jsonc"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260930.1",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4",
+    "wrangler": "^4.39.0"
+  }
+}

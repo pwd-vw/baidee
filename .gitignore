@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.db
+*.sqlite
+*.sqlite3
+*.egg-info/
+.DS_Store
+dev_log/

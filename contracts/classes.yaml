@@ -1,0 +1,15 @@
+schema_version: "1.0"
+crop: perilla
+classes:
+  - class_id: 1
+    name: LEAF_STRESS
+    type: detection
+  - class_id: 2
+    name: PEST_DAMAGE
+    type: detection
+  - class_id: 3
+    name: FUNGAL_INFECTION
+    type: detection
+  - class_id: 0
+    name: HEALTHY
+    type: derived_status
