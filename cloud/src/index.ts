@@ -105,7 +105,8 @@ async function ingest(request: Request, env: Env): Promise<Response> {
   if (existing) return json({ accepted: true, duplicate: true, capture_id: payload.capture_id });
 
   const key = imageKey(payload);
-  await env.IMAGES.put(key, image.stream(), {
+  const imageBytes = await image.arrayBuffer();
+  await env.IMAGES.put(key, imageBytes, {
     httpMetadata: { contentType: image.type || "image/jpeg" },
     customMetadata: { capture_id: payload.capture_id, node_id: payload.node_id },
   });
