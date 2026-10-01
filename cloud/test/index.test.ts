@@ -423,6 +423,70 @@ describe("Capture management: pagination, update, delete, export", () => {
   });
 });
 
+describe("Activity feed", () => {
+  async function seedHeartbeat(nodeId: string, timestamp: string) {
+    const body = JSON.stringify({ node_id: nodeId, timestamp, fw_version: "0.2.0", rssi: -50, uptime_ms: 12345 });
+    await worker.fetch(
+      new Request("https://baidee.test/v1/heartbeat", {
+        method: "POST",
+        headers: { "x-node-id": nodeId, "x-signature": await sign(body) },
+        body,
+      }),
+      env,
+    );
+  }
+
+  it("merges captures, commands, and heartbeats into one time-sorted feed", async () => {
+    await seedCapture("cap-1", "2026-10-01T10:00:00Z");
+    await seedHeartbeat("bd-s01-b01-c01", "2026-10-01T10:05:00Z");
+    const cookie = await adminCookie();
+    await worker.fetch(
+      new Request("https://baidee.test/v1/cmd", {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie },
+        body: JSON.stringify({ node_id: "bd-s01-b01-c01", command: "capture_now" }),
+      }),
+      env,
+    );
+
+    const response = await worker.fetch(new Request("https://baidee.test/v1/activity", { headers: { cookie } }), env);
+    expect(response.status).toBe(200);
+    const data = await response.json() as { items: Array<{ type: string; ts: string; node_id: string }> };
+    expect(data.items.map((i) => i.type).sort()).toEqual(["capture", "command", "heartbeat"]);
+    // Sorted newest first.
+    for (let i = 1; i < data.items.length; i++) {
+      expect(data.items[i - 1].ts >= data.items[i].ts).toBe(true);
+    }
+  });
+
+  it("filters the activity feed by type", async () => {
+    await seedCapture("cap-1", "2026-10-01T10:00:00Z");
+    await seedHeartbeat("bd-s01-b01-c01", "2026-10-01T10:05:00Z");
+    const cookie = await adminCookie();
+
+    const response = await worker.fetch(new Request("https://baidee.test/v1/activity?types=heartbeat", { headers: { cookie } }), env);
+    const data = await response.json() as { items: Array<{ type: string }> };
+    expect(data.items.every((i) => i.type === "heartbeat")).toBe(true);
+    expect(data.items.length).toBeGreaterThan(0);
+  });
+
+  it("filters the activity feed by node", async () => {
+    await seedCapture("cap-a", "2026-10-01T10:00:00Z", { nodeId: "bd-s01-b01-c01" });
+    await seedCapture("cap-b", "2026-10-01T10:00:00Z", { nodeId: "bd-s01-b02-c01" });
+    const cookie = await adminCookie();
+
+    const response = await worker.fetch(new Request("https://baidee.test/v1/activity?node=bd-s01-b02-c01", { headers: { cookie } }), env);
+    const data = await response.json() as { items: Array<{ node_id: string; detail: { capture_id: string } }> };
+    expect(data.items.every((i) => i.node_id === "bd-s01-b02-c01")).toBe(true);
+    expect(data.items.some((i) => i.detail.capture_id === "cap-b")).toBe(true);
+  });
+
+  it("rejects unauthenticated access to the activity feed", async () => {
+    const response = await worker.fetch(new Request("https://baidee.test/v1/activity"), env);
+    expect(response.status).toBe(401);
+  });
+});
+
 describe("User accounts and sessions", () => {
   it("rejects bootstrap without the service token", async () => {
     const response = await worker.fetch(

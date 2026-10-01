@@ -9,6 +9,7 @@ export class FakeD1 {
   usageDaily: Row[] = [];
   commands: Row[] = [];
   nodeStatus: Row[] = [];
+  nodeEvents: Row[] = [];
   users: Row[] = [];
   private nextCommandId = 1;
 
@@ -86,6 +87,20 @@ export class FakeD1 {
         rows = rows.slice(offset, offset + limit);
       }
       return rows.map((r) => ({ ...r, notes: r.notes ?? null }));
+    }
+    if (s.startsWith("SELECT capture_id, node_id, captured_at, stage, payload_json FROM captures")) {
+      let rows = [...this.captures];
+      if (s.includes("WHERE node_id = ?")) rows = rows.filter((r) => r.node_id === args[0]);
+      rows.sort((a, b) => (b.captured_at as string).localeCompare(a.captured_at as string));
+      const limit = Number(args[args.length - 1]);
+      return rows.slice(0, limit);
+    }
+    if (s.startsWith("SELECT id, node_id, command, status, created_at, delivered_at, completed_at, result_json FROM commands")) {
+      let rows = [...this.commands];
+      if (s.includes("WHERE node_id = ?")) rows = rows.filter((r) => r.node_id === args[0]);
+      rows.sort((a, b) => (b.created_at as string).localeCompare(a.created_at as string));
+      const limit = Number(args[args.length - 1]);
+      return rows.slice(0, limit).map((r) => ({ ...r, result_json: r.result_json ?? null, delivered_at: r.delivered_at ?? null, completed_at: r.completed_at ?? null }));
     }
     if (s.startsWith("SELECT image_key FROM captures WHERE capture_id")) {
       const row = this.captures.find((c) => c.capture_id === args[0]);
@@ -177,6 +192,22 @@ export class FakeD1 {
     }
     if (s.startsWith("SELECT * FROM node_status")) {
       return [...this.nodeStatus].sort((a, b) => (b.last_seen_at as string).localeCompare(a.last_seen_at as string));
+    }
+    if (s.startsWith("INSERT INTO node_events")) {
+      const keys = ["node_id", "ts", "fw_version", "wifi_ip", "rssi", "uptime_ms", "camera", "psram", "storage", "capture_interval_ms"];
+      this.nodeEvents.push(Object.fromEntries(keys.map((key, i) => [key, args[i]])));
+      return [];
+    }
+    if (s.startsWith("SELECT node_id, ts, fw_version, wifi_ip, rssi, uptime_ms, camera, psram, storage, capture_interval_ms")) {
+      let rows = [...this.nodeEvents];
+      let argIndex = 0;
+      if (s.includes("WHERE node_id = ?")) {
+        const value = args[argIndex++];
+        rows = rows.filter((r) => r.node_id === value);
+      }
+      rows.sort((a, b) => (b.ts as string).localeCompare(a.ts as string));
+      const limit = Number(args[argIndex]);
+      return rows.slice(0, limit);
     }
     if (s.startsWith("SELECT COUNT(*) AS count FROM users")) {
       return [{ count: this.users.length }];

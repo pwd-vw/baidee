@@ -643,6 +643,21 @@ async function heartbeat(request: Request, env: Env): Promise<Response> {
     payload.capture_interval_ms ?? null,
     JSON.stringify(payload),
   ).run();
+  await env.DB.prepare(
+    `INSERT INTO node_events(node_id, ts, fw_version, wifi_ip, rssi, uptime_ms, camera, psram, storage, capture_interval_ms)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    payload.node_id,
+    payload.timestamp,
+    payload.fw_version ?? null,
+    payload.wifi_ip ?? null,
+    payload.rssi ?? null,
+    payload.uptime_ms ?? null,
+    payload.camera ?? null,
+    payload.psram ?? null,
+    payload.storage ?? null,
+    payload.capture_interval_ms ?? null,
+  ).run();
   return json({ accepted: true });
 }
 
@@ -652,6 +667,115 @@ async function listNodes(request: Request, env: Env): Promise<Response> {
     "SELECT * FROM node_status ORDER BY last_seen_at DESC",
   ).all();
   return json({ nodes: nodes.results });
+}
+
+type ActivityItem = {
+  type: "capture" | "command" | "heartbeat";
+  ts: string;
+  node_id: string;
+  summary: string;
+  detail: Record<string, unknown>;
+};
+
+// Per-source fetch size before merging and trimming to the caller's limit —
+// generous enough that merging three differently-paced streams still yields
+// a full page of the most recent items across all of them.
+const ACTIVITY_SOURCE_LIMIT = 100;
+
+async function getActivity(request: Request, env: Env): Promise<Response> {
+  if (!(await authenticate(request, env))) return json({ error: "unauthorized" }, 401);
+  const url = new URL(request.url);
+  const node = url.searchParams.get("node");
+  const typesParam = url.searchParams.get("types");
+  const types = typesParam ? new Set(typesParam.split(",")) : null;
+  const requestedLimit = Number(url.searchParams.get("limit") ?? 50);
+  const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(Math.trunc(requestedLimit), 1), 200) : 50;
+
+  const nodeClause = node ? "WHERE node_id = ?" : "";
+  const nodeArgs = node ? [node] : [];
+  const items: ActivityItem[] = [];
+
+  if (!types || types.has("capture")) {
+    const result = await env.DB.prepare(
+      `SELECT capture_id, node_id, captured_at, stage, payload_json FROM captures ${nodeClause} ORDER BY captured_at DESC LIMIT ?`,
+    ).bind(...nodeArgs, ACTIVITY_SOURCE_LIMIT).all<{
+      capture_id: string; node_id: string; captured_at: string; stage: string; payload_json: string;
+    }>();
+    for (const c of result.results) {
+      let status = "unknown";
+      try {
+        status = (JSON.parse(c.payload_json) as { status?: string }).status ?? "unknown";
+      } catch {
+        // keep "unknown"
+      }
+      items.push({
+        type: "capture",
+        ts: c.captured_at,
+        node_id: c.node_id,
+        summary: `Capture (${c.stage}) — ${status}`,
+        detail: { capture_id: c.capture_id, stage: c.stage, status },
+      });
+    }
+  }
+
+  if (!types || types.has("command")) {
+    const result = await env.DB.prepare(
+      `SELECT id, node_id, command, status, created_at, delivered_at, completed_at, result_json FROM commands ${nodeClause} ORDER BY created_at DESC LIMIT ?`,
+    ).bind(...nodeArgs, ACTIVITY_SOURCE_LIMIT).all<{
+      id: number; node_id: string; command: string; status: string;
+      created_at: string; delivered_at: string | null; completed_at: string | null; result_json: string | null;
+    }>();
+    for (const cmd of result.results) {
+      items.push({
+        type: "command",
+        ts: cmd.completed_at ?? cmd.delivered_at ?? cmd.created_at,
+        node_id: cmd.node_id,
+        summary: `Command ${cmd.command} — ${cmd.status}`,
+        detail: {
+          id: cmd.id,
+          command: cmd.command,
+          status: cmd.status,
+          created_at: cmd.created_at,
+          delivered_at: cmd.delivered_at,
+          completed_at: cmd.completed_at,
+          result: cmd.result_json ? JSON.parse(cmd.result_json) : null,
+        },
+      });
+    }
+  }
+
+  if (!types || types.has("heartbeat")) {
+    const result = await env.DB.prepare(
+      `SELECT node_id, ts, fw_version, wifi_ip, rssi, uptime_ms, camera, psram, storage, capture_interval_ms
+       FROM node_events ${nodeClause} ORDER BY ts DESC LIMIT ?`,
+    ).bind(...nodeArgs, ACTIVITY_SOURCE_LIMIT).all<{
+      node_id: string; ts: string; fw_version: string | null; wifi_ip: string | null; rssi: number | null;
+      uptime_ms: number | null; camera: string | null; psram: string | null; storage: string | null;
+      capture_interval_ms: number | null;
+    }>();
+    for (const e of result.results) {
+      const uptimeMin = e.uptime_ms != null ? Math.round(e.uptime_ms / 60000) : null;
+      items.push({
+        type: "heartbeat",
+        ts: e.ts,
+        node_id: e.node_id,
+        summary: `Heartbeat — rssi ${e.rssi ?? "-"} dBm, uptime ${uptimeMin ?? "-"}m`,
+        detail: {
+          fw_version: e.fw_version,
+          wifi_ip: e.wifi_ip,
+          rssi: e.rssi,
+          uptime_ms: e.uptime_ms,
+          camera: e.camera,
+          psram: e.psram,
+          storage: e.storage,
+          capture_interval_ms: e.capture_interval_ms,
+        },
+      });
+    }
+  }
+
+  items.sort((a, b) => (b.ts || "").localeCompare(a.ts || ""));
+  return json({ items: items.slice(0, limit) });
 }
 
 async function login(request: Request, env: Env): Promise<Response> {
@@ -1133,6 +1257,9 @@ function dashboardHtml(): string {
   .badge.ok { background:#1e3d2c; color:#7be3a5; }
   .badge.warn { background:#3d2f1e; color:#e3b97b; }
   .badge.bad { background:#3d1e1e; color:#e37b7b; }
+  .badge.info { background:#1e2f3d; color:#7bbfe3; }
+  #logRows tr { cursor:pointer; }
+  #logRows tr:hover { background:rgba(255,255,255,.03); }
   button, input, select { font: inherit; }
   button { background: var(--accent); color:#06180f; border:none; border-radius:6px; padding:6px 12px; cursor:pointer; font-weight:600; }
   button.secondary { background: transparent; color: var(--fg); border:1px solid var(--border); }
@@ -1177,6 +1304,7 @@ function dashboardHtml(): string {
 <nav class="tabbar">
   <button class="tab-btn active" data-tab="overview">Overview</button>
   <button class="tab-btn" data-tab="camera">Camera</button>
+  <button class="tab-btn" data-tab="logs">Logs</button>
 </nav>
 <main>
 <div id="tab-overview" class="tab-panel">
@@ -1257,6 +1385,27 @@ function dashboardHtml(): string {
     </div>
   </section>
 </div>
+
+<div id="tab-logs" class="tab-panel" style="display:none">
+  <section>
+    <h2>Activity log</h2>
+    <p class="muted">Captures, remote commands, and device heartbeats in one time-ordered feed. Click a row for full detail.</p>
+    <div class="row" style="margin-bottom:12px">
+      <select id="logNodeFilter"><option value="">All nodes</option></select>
+      <label class="muted" style="display:flex; align-items:center; gap:4px"><input type="checkbox" class="logTypeFilter" value="capture" checked> Captures</label>
+      <label class="muted" style="display:flex; align-items:center; gap:4px"><input type="checkbox" class="logTypeFilter" value="command" checked> Commands</label>
+      <label class="muted" style="display:flex; align-items:center; gap:4px"><input type="checkbox" class="logTypeFilter" value="heartbeat" checked> Heartbeats</label>
+      <button class="secondary" id="logRefreshBtn">Refresh</button>
+      <label class="muted" style="display:flex; align-items:center; gap:6px">
+        <input type="checkbox" id="logAutoRefresh" checked> Auto-refresh (10s)
+      </label>
+    </div>
+    <table>
+      <thead><tr><th>Time (Bangkok)</th><th>Type</th><th>Node</th><th>Summary</th></tr></thead>
+      <tbody id="logRows"></tbody>
+    </table>
+  </section>
+</div>
 </main>
 </div>
 
@@ -1332,11 +1481,18 @@ function switchTab(tab) {
   document.querySelectorAll(".tab-btn").forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === tab));
   document.getElementById("tab-overview").style.display = tab === "overview" ? "block" : "none";
   document.getElementById("tab-camera").style.display = tab === "camera" ? "block" : "none";
+  document.getElementById("tab-logs").style.display = tab === "logs" ? "block" : "none";
   if (tab === "camera") {
     populateCameraNodeSelect().then(loadCameraSnapshot);
     startCameraAutoRefresh();
   } else {
     stopCameraAutoRefresh();
+  }
+  if (tab === "logs") {
+    populateLogNodeFilter().then(loadLogs);
+    startLogAutoRefresh();
+  } else {
+    stopLogAutoRefresh();
   }
 }
 document.querySelectorAll(".tab-btn").forEach((btn) => {
@@ -1600,7 +1756,9 @@ function promptInterval(nodeId) {
 async function openPreview(captureId, meta) {
   const response = await api("/v1/image/" + encodeURIComponent(captureId));
   const blob = await response.blob();
-  document.getElementById("modalImg").src = URL.createObjectURL(blob);
+  const modalImg = document.getElementById("modalImg");
+  modalImg.src = URL.createObjectURL(blob);
+  modalImg.style.display = "block";
   document.getElementById("modalMeta").textContent = JSON.stringify(meta, null, 2);
   document.getElementById("modal").style.display = "flex";
 }
@@ -1733,6 +1891,72 @@ async function loadAll() {
   await Promise.all([loadStats(), loadNodes(), loadCaptures(), loadUsers()]);
 }
 
+let logAutoRefreshTimer = null;
+
+function startLogAutoRefresh() {
+  stopLogAutoRefresh();
+  if (!document.getElementById("logAutoRefresh").checked) return;
+  logAutoRefreshTimer = setInterval(loadLogs, 10000);
+}
+function stopLogAutoRefresh() {
+  if (logAutoRefreshTimer) {
+    clearInterval(logAutoRefreshTimer);
+    logAutoRefreshTimer = null;
+  }
+}
+document.getElementById("logAutoRefresh").onchange = () => {
+  if (document.getElementById("logAutoRefresh").checked) startLogAutoRefresh();
+  else stopLogAutoRefresh();
+};
+document.getElementById("logRefreshBtn").onclick = loadLogs;
+document.getElementById("logNodeFilter").onchange = loadLogs;
+document.querySelectorAll(".logTypeFilter").forEach((el) => {
+  el.onchange = loadLogs;
+});
+
+async function populateLogNodeFilter() {
+  const response = await api("/v1/nodes");
+  const data = await response.json();
+  const select = document.getElementById("logNodeFilter");
+  const current = select.value;
+  select.innerHTML = '<option value="">All nodes</option>'
+    + data.nodes.map((n) => \`<option value="\${escapeHtml(n.node_id)}">\${escapeHtml(n.node_id)}</option>\`).join("");
+  select.value = current;
+}
+
+const LOG_TYPE_BADGE = { capture: "ok", command: "warn", heartbeat: "info" };
+
+async function loadLogs() {
+  const node = document.getElementById("logNodeFilter").value;
+  const types = [...document.querySelectorAll(".logTypeFilter:checked")].map((el) => el.value);
+  const params = new URLSearchParams();
+  if (node) params.set("node", node);
+  if (types.length) params.set("types", types.join(","));
+  params.set("limit", "100");
+  const response = await api("/v1/activity?" + params.toString());
+  const data = await response.json();
+  const tbody = document.getElementById("logRows");
+  if (!data.items.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="muted">No activity yet for this filter.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = data.items.map((item, index) => \`
+    <tr data-index="\${index}">
+      <td>\${bangkokTime(item.ts)}</td>
+      <td><span class="badge \${LOG_TYPE_BADGE[item.type] || ""}">\${escapeHtml(item.type)}</span></td>
+      <td>\${escapeHtml(item.node_id)}</td>
+      <td>\${escapeHtml(item.summary)}</td>
+    </tr>\`).join("");
+  tbody.querySelectorAll("tr[data-index]").forEach((row) => {
+    row.onclick = () => {
+      const item = data.items[Number(row.dataset.index)];
+      document.getElementById("modalImg").style.display = "none";
+      document.getElementById("modalMeta").textContent = JSON.stringify(item, null, 2);
+      document.getElementById("modal").style.display = "flex";
+    };
+  });
+}
+
 (async () => {
   try {
     const response = await fetch("/auth/me", { credentials: "same-origin" });
@@ -1761,11 +1985,11 @@ export default {
       return json({
         service: "baidee-api",
         status: "ok",
-        version: "0.4.0",
+        version: "0.5.0",
         endpoints: [
           "/healthz", "/dashboard",
           "/v1/ingest", "/v1/captures", "/v1/captures/{capture_id} (PATCH)", "/v1/captures/{capture_id} (DELETE)",
-          "/v1/image/{capture_id}", "/v1/export", "/v1/stats",
+          "/v1/image/{capture_id}", "/v1/export", "/v1/stats", "/v1/activity",
           "/v1/cmd", "/v1/cmd (POST)", "/v1/cmd/ack", "/v1/heartbeat", "/v1/nodes",
           "/auth/bootstrap", "/auth/login", "/auth/logout", "/auth/me",
           "/auth/users", "/auth/users (POST)", "/auth/users/{email} (DELETE)",
@@ -1881,6 +2105,14 @@ export default {
       } catch (error) {
         console.error(JSON.stringify({ event: "nodes_failed", error: String(error) }));
         return json({ error: "could not load nodes" }, 500);
+      }
+    }
+    if (request.method === "GET" && url.pathname === "/v1/activity") {
+      try {
+        return await getActivity(request, env);
+      } catch (error) {
+        console.error(JSON.stringify({ event: "activity_failed", error: String(error) }));
+        return json({ error: "could not load activity" }, 500);
       }
     }
     if (request.method === "GET" && url.pathname === "/v1/cmd") return listCommands(request, env);
