@@ -44,13 +44,32 @@
 #define BAIDEE_RETRY_INTERVAL_MS (5UL * 60UL * 1000UL)
 #endif
 
+#ifndef BAIDEE_CMD_POLL_INTERVAL_MS
+#define BAIDEE_CMD_POLL_INTERVAL_MS (45UL * 1000UL)
+#endif
+
+#ifndef BAIDEE_HEARTBEAT_INTERVAL_MS
+#define BAIDEE_HEARTBEAT_INTERVAL_MS (10UL * 60UL * 1000UL)
+#endif
+
+#ifndef BAIDEE_WIFI_RETRY_INTERVAL_MS
+#define BAIDEE_WIFI_RETRY_INTERVAL_MS (2UL * 60UL * 1000UL)
+#endif
+
 namespace {
-constexpr uint32_t CaptureIntervalMs = BAIDEE_CAPTURE_INTERVAL_MS;
+constexpr char FirmwareVersion[] = "0.2.0";
+constexpr uint32_t DefaultCaptureIntervalMs = BAIDEE_CAPTURE_INTERVAL_MS;
 constexpr uint32_t RetryIntervalMs = BAIDEE_RETRY_INTERVAL_MS;
+constexpr uint32_t CmdPollIntervalMs = BAIDEE_CMD_POLL_INTERVAL_MS;
+constexpr uint32_t HeartbeatIntervalMs = BAIDEE_HEARTBEAT_INTERVAL_MS;
+constexpr uint32_t WifiRetryIntervalMs = BAIDEE_WIFI_RETRY_INTERVAL_MS;
+constexpr uint32_t MinCaptureIntervalMs = 60UL * 1000UL;
 constexpr framesize_t CaptureFrameSize = FRAMESIZE_UXGA;
 constexpr uint8_t JpegQuality = 10;
 constexpr char PendingImagePath[] = "/pending.jpg";
 constexpr char PendingPayloadPath[] = "/pending.json";
+constexpr char WifiOverridePath[] = "/wifi.json";
+constexpr char ConfigOverridePath[] = "/config.json";
 constexpr char MultipartBoundary[] = "----BaiDeeCaptureBoundary";
 
 bool cameraReady = false;
@@ -58,8 +77,18 @@ bool wifiReady = false;
 bool timeReady = false;
 bool otaReady = false;
 bool storageReady = false;
+bool wifiOverrideLoaded = false;
 uint32_t lastCaptureAt = 0;
 uint32_t lastRetryAt = 0;
+uint32_t lastCmdPollAt = 0;
+uint32_t lastHeartbeatAt = 0;
+uint32_t lastWifiRetryAt = 0;
+uint32_t captureIntervalMs = DefaultCaptureIntervalMs;
+String overrideSsid;
+String overridePassword;
+
+void captureFrame();
+void connectNetwork();
 
 camera_config_t cameraConfig() {
   camera_config_t config{};
@@ -106,12 +135,60 @@ bool initializeCamera() {
   return true;
 }
 
+String activeSsid() {
+  return wifiOverrideLoaded ? overrideSsid : String(BAIDEE_WIFI_SSID);
+}
+
+String activePassword() {
+  return wifiOverrideLoaded ? overridePassword : String(BAIDEE_WIFI_PASSWORD);
+}
+
 bool networkConfigured() {
-  return BAIDEE_WIFI_SSID[0] != '\0';
+  return activeSsid().length() > 0;
 }
 
 bool uploadConfigured() {
   return BAIDEE_WORKER_URL[0] != '\0' && BAIDEE_HMAC_SECRET[0] != '\0';
+}
+
+String jsonEscape(const String& value) {
+  String out;
+  out.reserve(value.length());
+  for (size_t index = 0; index < value.length(); ++index) {
+    const char c = value[index];
+    if (c == '"' || c == '\\') out += '\\';
+    if (c == '\n') {
+      out += "\\n";
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+// Extracts a string value for "key" from a flat JSON object. Handles the
+// small, self-generated payloads this firmware exchanges with the Worker;
+// it does not handle escaped quotes inside the value.
+String extractJsonString(const String& json, const String& key, const String& fallback) {
+  const String pattern = "\"" + key + "\":\"";
+  const int start = json.indexOf(pattern);
+  if (start < 0) return fallback;
+  const int valueStart = start + pattern.length();
+  const int valueEnd = json.indexOf('"', valueStart);
+  if (valueEnd < 0) return fallback;
+  return json.substring(valueStart, valueEnd);
+}
+
+long extractJsonNumber(const String& json, const String& key, long fallback) {
+  const String pattern = "\"" + key + "\":";
+  const int start = json.indexOf(pattern);
+  if (start < 0) return fallback;
+  int index = start + pattern.length();
+  const int length = json.length();
+  int end = index;
+  while (end < length && (isDigit(json[end]) || json[end] == '-')) end++;
+  if (end == index) return fallback;
+  return json.substring(index, end).toInt();
 }
 
 String hexBytes(const uint8_t* bytes, size_t length) {
@@ -164,7 +241,9 @@ String makePayload(const String& captureId, const String& timestamp, const Strin
   payload += "\",\"node_id\":\"" + String(BAIDEE_NODE_ID);
   payload += "\",\"site_id\":\"s01\",\"bed_id\":\"b01\",\"timestamp\":\"" + timestamp;
   payload += "\",\"image_sha256\":\"" + imageSha;
-  payload += "\",\"image_size\":{\"w\":1600,\"h\":1200},\"stage\":\"edge_triage\",\"capture_meta\":{\"fw\":\"0.1.0\",\"bytes\":";
+  payload += "\",\"image_size\":{\"w\":1600,\"h\":1200},\"stage\":\"edge_triage\",\"capture_meta\":{\"fw\":\"";
+  payload += FirmwareVersion;
+  payload += "\",\"bytes\":";
   payload += String(imageSize) + "}}";
   return payload;
 }
@@ -173,6 +252,55 @@ bool initializeStorage() {
   storageReady = LittleFS.begin(true);
   Serial.printf("storage=%s\n", storageReady ? "ready" : "failed");
   return storageReady;
+}
+
+void loadWifiOverride() {
+  if (!storageReady || !LittleFS.exists(WifiOverridePath)) return;
+  File file = LittleFS.open(WifiOverridePath, FILE_READ);
+  if (!file) return;
+  const String content = file.readString();
+  file.close();
+  const String ssid = extractJsonString(content, "ssid", "");
+  if (ssid.length() == 0) return;
+  overrideSsid = ssid;
+  overridePassword = extractJsonString(content, "password", "");
+  wifiOverrideLoaded = true;
+  Serial.printf("wifi_override=loaded ssid=%s\n", overrideSsid.c_str());
+}
+
+bool saveWifiOverride(const String& ssid, const String& password) {
+  if (!storageReady) return false;
+  File file = LittleFS.open(WifiOverridePath, FILE_WRITE);
+  if (!file) return false;
+  const String content = "{\"ssid\":\"" + jsonEscape(ssid) + "\",\"password\":\"" + jsonEscape(password) + "\"}";
+  file.print(content);
+  file.close();
+  overrideSsid = ssid;
+  overridePassword = password;
+  wifiOverrideLoaded = true;
+  return true;
+}
+
+void loadConfigOverride() {
+  if (!storageReady || !LittleFS.exists(ConfigOverridePath)) return;
+  File file = LittleFS.open(ConfigOverridePath, FILE_READ);
+  if (!file) return;
+  const String content = file.readString();
+  file.close();
+  const long interval = extractJsonNumber(content, "capture_interval_ms", -1);
+  if (interval >= static_cast<long>(MinCaptureIntervalMs)) {
+    captureIntervalMs = static_cast<uint32_t>(interval);
+    Serial.printf("config_override=loaded capture_interval_ms=%lu\n", static_cast<unsigned long>(captureIntervalMs));
+  }
+}
+
+bool saveConfigOverride(uint32_t intervalMs) {
+  if (!storageReady) return false;
+  File file = LittleFS.open(ConfigOverridePath, FILE_WRITE);
+  if (!file) return false;
+  file.print("{\"capture_interval_ms\":" + String(intervalMs) + "}");
+  file.close();
+  return true;
 }
 
 bool savePending(const String& payload, const uint8_t* image, size_t imageSize) {
@@ -185,6 +313,154 @@ bool savePending(const String& payload, const uint8_t* image, size_t imageSize) 
   payloadFile.close();
   imageFile.close();
   return written == imageSize;
+}
+
+String workerHost() {
+  String url = BAIDEE_WORKER_URL;
+  if (!url.startsWith("https://")) return "";
+  url.remove(0, 8);
+  const int slash = url.indexOf('/');
+  return slash < 0 ? url : url.substring(0, slash);
+}
+
+int extractStatusCode(const String& statusLine) {
+  const int firstSpace = statusLine.indexOf(' ');
+  if (firstSpace < 0) return 0;
+  const int secondSpace = statusLine.indexOf(' ', firstSpace + 1);
+  String code = secondSpace < 0 ? statusLine.substring(firstSpace + 1) : statusLine.substring(firstSpace + 1, secondSpace);
+  code.trim();
+  return code.toInt();
+}
+
+// Minimal HTTPS/1.1 request for the small JSON endpoints (cmd poll, cmd ack,
+// heartbeat). The multipart image upload in uploadPending() stays separate
+// because it streams the file body directly.
+bool httpsRequest(const String& method, const String& path, const String& body, const String& extraHeaders, String& responseBody, int& statusCode) {
+  statusCode = 0;
+  const String host = workerHost();
+  if (host.isEmpty()) return false;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(15000);
+  if (!client.connect(host.c_str(), 443)) return false;
+
+  client.printf("%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n", method.c_str(), path.c_str(), host.c_str());
+  client.print(extraHeaders);
+  if (body.length() > 0) {
+    client.printf("Content-Type: application/json\r\nContent-Length: %u\r\n\r\n", static_cast<unsigned>(body.length()));
+    client.print(body);
+  } else {
+    client.print("\r\n");
+  }
+
+  const String statusLine = client.readStringUntil('\n');
+  statusCode = extractStatusCode(statusLine);
+  while (client.connected() || client.available()) {
+    const String line = client.readStringUntil('\n');
+    if (line.length() <= 1) break;
+  }
+  responseBody = client.readString();
+  client.stop();
+  return statusCode >= 200 && statusCode < 300;
+}
+
+void ackCommand(long commandId, bool ok, const String& message) {
+  const String status = ok ? "done" : "failed";
+  const String canonical = String(BAIDEE_NODE_ID) + ":" + String(commandId) + ":" + status;
+  const String body = "{\"node_id\":\"" + String(BAIDEE_NODE_ID) + "\",\"command_id\":" + String(commandId)
+    + ",\"status\":\"" + status + "\",\"message\":\"" + jsonEscape(message) + "\"}";
+  const String headers = "X-Signature: " + hmacHex(canonical) + "\r\n";
+  String responseBody;
+  int statusCode;
+  httpsRequest("POST", "/v1/cmd/ack", body, headers, responseBody, statusCode);
+  Serial.printf("cmd_ack id=%ld status=%s http=%d\n", commandId, status.c_str(), statusCode);
+}
+
+void executeCommand(const String& commandObject) {
+  const long id = extractJsonNumber(commandObject, "id", -1);
+  const String command = extractJsonString(commandObject, "command", "");
+  const int argsIndex = commandObject.indexOf("\"args\":{");
+  const String args = argsIndex >= 0 ? commandObject.substring(argsIndex + 7) : "{}";
+
+  bool ok = true;
+  String message = "ok";
+
+  if (command == "capture_now") {
+    captureFrame();
+  } else if (command == "set_wifi") {
+    const String ssid = extractJsonString(args, "ssid", "");
+    const String password = extractJsonString(args, "password", "");
+    if (ssid.length() == 0) {
+      ok = false;
+      message = "missing ssid";
+    } else if (!saveWifiOverride(ssid, password)) {
+      ok = false;
+      message = "storage_failed";
+    } else {
+      connectNetwork();
+      ok = wifiReady;
+      message = wifiReady ? "connected" : "connect_failed";
+    }
+  } else if (command == "set_config") {
+    const long intervalMs = extractJsonNumber(args, "capture_interval_ms", -1);
+    if (intervalMs < static_cast<long>(MinCaptureIntervalMs)) {
+      ok = false;
+      message = "invalid capture_interval_ms";
+    } else if (!saveConfigOverride(static_cast<uint32_t>(intervalMs))) {
+      ok = false;
+      message = "storage_failed";
+    } else {
+      captureIntervalMs = static_cast<uint32_t>(intervalMs);
+    }
+  } else {
+    ok = false;
+    message = "unknown_command";
+  }
+
+  Serial.printf("cmd_exec id=%ld command=%s ok=%s\n", id, command.c_str(), ok ? "true" : "false");
+  if (id >= 0) ackCommand(id, ok, message);
+}
+
+void pollCommands() {
+  if (!wifiReady || !uploadConfigured()) return;
+  const String path = "/v1/cmd?node=" + String(BAIDEE_NODE_ID);
+  const String headers = "X-Signature: " + hmacHex(String(BAIDEE_NODE_ID)) + "\r\n";
+  String responseBody;
+  int statusCode;
+  if (!httpsRequest("GET", path, "", headers, responseBody, statusCode) || statusCode != 200) return;
+
+  const int arrayStart = responseBody.indexOf('[');
+  const int arrayEnd = responseBody.lastIndexOf(']');
+  if (arrayStart < 0 || arrayEnd <= arrayStart) return;
+  const String items = responseBody.substring(arrayStart + 1, arrayEnd);
+  if (items.length() == 0) return;
+
+  // Process only the first queued command per poll; the next poll (every
+  // CmdPollIntervalMs) picks up the rest.
+  const int splitAt = items.indexOf("},{");
+  const String first = splitAt < 0 ? items : items.substring(0, splitAt + 1);
+  executeCommand(first);
+}
+
+void sendHeartbeat() {
+  if (!wifiReady || !uploadConfigured() || !timeReady) return;
+  const String ip = wifiReady ? WiFi.localIP().toString() : "";
+  String payload;
+  payload.reserve(320);
+  payload += "{\"node_id\":\"" + String(BAIDEE_NODE_ID) + "\",\"timestamp\":\"" + utcTimestamp() + "\"";
+  payload += ",\"fw_version\":\"" + String(FirmwareVersion) + "\",\"wifi_ip\":\"" + ip + "\"";
+  payload += ",\"rssi\":" + String(WiFi.RSSI()) + ",\"uptime_ms\":" + String(millis());
+  payload += ",\"camera\":\"" + String(cameraReady ? "ready" : "failed") + "\"";
+  payload += ",\"psram\":\"" + String(psramFound() ? "available" : "missing") + "\"";
+  payload += ",\"storage\":\"" + String(storageReady ? "ready" : "failed") + "\"";
+  payload += ",\"capture_interval_ms\":" + String(captureIntervalMs) + "}";
+
+  const String headers = "X-Node-Id: " + String(BAIDEE_NODE_ID) + "\r\nX-Signature: " + hmacHex(payload) + "\r\n";
+  String responseBody;
+  int statusCode;
+  httpsRequest("POST", "/v1/heartbeat", payload, headers, responseBody, statusCode);
+  Serial.printf("heartbeat http=%d\n", statusCode);
 }
 
 bool uploadPending() {
@@ -255,9 +531,11 @@ void connectNetwork() {
     return;
   }
 
+  const String ssid = activeSsid();
+  const String password = activePassword();
   WiFi.mode(WIFI_STA);
-  WiFi.begin(BAIDEE_WIFI_SSID, BAIDEE_WIFI_PASSWORD);
-  Serial.printf("wifi_connecting ssid=%s\n", BAIDEE_WIFI_SSID);
+  WiFi.begin(ssid.c_str(), password.c_str());
+  Serial.printf("wifi_connecting ssid=%s\n", ssid.c_str());
   const uint32_t startedAt = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startedAt < 15000) {
     delay(250);
@@ -279,9 +557,27 @@ void connectNetwork() {
   otaReady = true;
 }
 
+// connectNetwork() only ever ran once, at boot. If that attempt failed (or
+// Wi-Fi later dropped — a router reboot, moving the device, interference —
+// wifiReady stayed stuck at whatever it was last set to, with nothing in
+// loop() to ever retry. This checks the real WiFi.status() periodically and
+// reconnects on its own, so the device recovers without a manual power cycle.
+void maintainWifi() {
+  if (!networkConfigured()) return;
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiReady = true;
+    return;
+  }
+  wifiReady = false;
+  if (millis() - lastWifiRetryAt < WifiRetryIntervalMs) return;
+  lastWifiRetryAt = millis();
+  Serial.println("wifi_retry");
+  connectNetwork();
+}
+
 void printHealth() {
   String ip = wifiReady ? WiFi.localIP().toString() : "-";
-  Serial.printf("health camera=%s psram=%s wifi=%s ip=%s ntp=%s ota=%s upload=%s storage=%s uptime_ms=%lu\n",
+  Serial.printf("health camera=%s psram=%s wifi=%s ip=%s ntp=%s ota=%s upload=%s storage=%s interval_ms=%lu uptime_ms=%lu\n",
     cameraReady ? "ready" : "failed",
     psramFound() ? "available" : "missing",
     wifiReady ? "ready" : (networkConfigured() ? "failed" : "not_configured"),
@@ -290,6 +586,7 @@ void printHealth() {
     otaReady ? "ready" : "not_ready",
     uploadConfigured() ? "configured" : "not_configured",
     storageReady ? "ready" : "failed",
+    static_cast<unsigned long>(captureIntervalMs),
     static_cast<unsigned long>(millis()));
 }
 
@@ -312,7 +609,10 @@ void captureFrame() {
   );
   if (uploadConfigured() && timeReady) {
     const String timestamp = utcTimestamp();
-    const String captureId = timestamp.substring(0, 4) + timestamp.substring(5, 7) + timestamp.substring(8, 10) + "T" + timestamp.substring(11, 17) + "Z_" + BAIDEE_NODE_ID;
+    // timestamp is "YYYY-MM-DDTHH:MM:SSZ"; build "YYYYMMDDTHHMMSSZ_node" per the SSOT capture_id convention.
+    const String captureId = timestamp.substring(0, 4) + timestamp.substring(5, 7) + timestamp.substring(8, 10)
+      + "T" + timestamp.substring(11, 13) + timestamp.substring(14, 16) + timestamp.substring(17, 19)
+      + "Z_" + BAIDEE_NODE_ID;
     const String payload = makePayload(captureId, timestamp, imageSha256(frame->buf, frame->len), frame->len);
     if (savePending(payload, frame->buf, frame->len)) uploadPending();
   }
@@ -330,8 +630,12 @@ void processSerialCommands() {
     printHealth();
   } else if (command.equalsIgnoreCase("upload")) {
     uploadPending();
+  } else if (command.equalsIgnoreCase("cmd")) {
+    pollCommands();
+  } else if (command.equalsIgnoreCase("hb")) {
+    sendHeartbeat();
   } else {
-    Serial.println("commands=capture|health|wifi|upload");
+    Serial.println("commands=capture|health|wifi|upload|cmd|hb");
   }
 }
 }
@@ -341,26 +645,42 @@ void setup() {
   Serial.setTimeout(20);
   delay(300);
 
-  Serial.println("baidee_firmware=0.1.0");
+  Serial.printf("baidee_firmware=%s\n", FirmwareVersion);
   Serial.println("board=mb0184_esp32_s3_cam");
   Serial.printf("psram=%s flash_mb=%u\n", psramFound() ? "available" : "missing", ESP.getFlashChipSize() / (1024U * 1024U));
 
   initializeStorage();
+  loadWifiOverride();
+  loadConfigOverride();
   cameraReady = initializeCamera();
   Serial.printf("camera=%s\n", cameraReady ? "ready" : "failed");
   connectNetwork();
   captureFrame();
+  sendHeartbeat();
   lastCaptureAt = millis();
+  lastCmdPollAt = millis();
+  lastHeartbeatAt = millis();
+  lastWifiRetryAt = millis();
 }
 
 void loop() {
   processSerialCommands();
+  maintainWifi();
   if (otaReady) ArduinoOTA.handle();
   retryPending();
+
   const uint32_t now = millis();
-  if (now - lastCaptureAt >= CaptureIntervalMs) {
+  if (now - lastCaptureAt >= captureIntervalMs) {
     captureFrame();
     lastCaptureAt = now;
+  }
+  if (now - lastCmdPollAt >= CmdPollIntervalMs) {
+    pollCommands();
+    lastCmdPollAt = now;
+  }
+  if (now - lastHeartbeatAt >= HeartbeatIntervalMs) {
+    sendHeartbeat();
+    lastHeartbeatAt = now;
   }
   delay(10);
 }
