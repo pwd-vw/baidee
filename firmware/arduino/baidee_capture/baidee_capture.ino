@@ -45,7 +45,7 @@
 #endif
 
 #ifndef BAIDEE_CMD_POLL_INTERVAL_MS
-#define BAIDEE_CMD_POLL_INTERVAL_MS (45UL * 1000UL)
+#define BAIDEE_CMD_POLL_INTERVAL_MS (10UL * 1000UL)
 #endif
 
 #ifndef BAIDEE_HEARTBEAT_INTERVAL_MS
@@ -54,6 +54,18 @@
 
 #ifndef BAIDEE_WIFI_RETRY_INTERVAL_MS
 #define BAIDEE_WIFI_RETRY_INTERVAL_MS (2UL * 60UL * 1000UL)
+#endif
+
+// Mirrors the frame left-to-right so any text/markers in view (zone labels,
+// reference cards) read correctly, matching how this camera is physically
+// mounted. Override per-node in config.h if a different unit is mounted
+// rotated/mirrored the other way.
+#ifndef BAIDEE_CAMERA_HMIRROR
+#define BAIDEE_CAMERA_HMIRROR 1
+#endif
+
+#ifndef BAIDEE_CAMERA_VFLIP
+#define BAIDEE_CAMERA_VFLIP 0
 #endif
 
 namespace {
@@ -131,6 +143,8 @@ bool initializeCamera() {
   if (sensor != nullptr) {
     sensor->set_framesize(sensor, CaptureFrameSize);
     sensor->set_quality(sensor, JpegQuality);
+    sensor->set_hmirror(sensor, BAIDEE_CAMERA_HMIRROR);
+    sensor->set_vflip(sensor, BAIDEE_CAMERA_VFLIP);
   }
   return true;
 }

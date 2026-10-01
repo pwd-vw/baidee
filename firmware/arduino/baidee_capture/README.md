@@ -33,8 +33,10 @@ Copy `config.h.example` to `config.h` and fill in real values. `config.h` is ign
 | `BAIDEE_OTA_PASSWORD` | Password for `ArduinoOTA` | OTA runs without a password — set a real one before field use |
 | `BAIDEE_CAPTURE_INTERVAL_MS` | Scheduled capture interval (startup default) | Falls back to the in-`.ino` default; can still be changed later at runtime, see below |
 | `BAIDEE_RETRY_INTERVAL_MS` | How often a failed upload is retried from the LittleFS queue | Defaults to 5 minutes |
-| `BAIDEE_CMD_POLL_INTERVAL_MS` | How often the device polls `GET /v1/cmd` | Defaults to 45 seconds |
+| `BAIDEE_CMD_POLL_INTERVAL_MS` | How often the device polls `GET /v1/cmd` | Defaults to 10 seconds (keeps `capture_now` latency under ~30s) |
 | `BAIDEE_HEARTBEAT_INTERVAL_MS` | How often the device reports status via `POST /v1/heartbeat` | Defaults to 10 minutes |
+| `BAIDEE_CAMERA_HMIRROR` | `1`/`0` — mirror the frame left-to-right | Defaults to `1` (mirrored), matching this camera's physical mounting so in-frame text/markers read correctly |
+| `BAIDEE_CAMERA_VFLIP` | `1`/`0` — flip the frame top-to-bottom | Defaults to `0` |
 
 If `config.h` defines a macro, that value always wins over the `.ino` default (standard C preprocessor `#ifndef` guard) — there is no later runtime override of these specific macros.
 

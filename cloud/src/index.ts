@@ -1147,6 +1147,13 @@ function dashboardHtml(): string {
   .node-card { border:1px solid var(--border); border-radius:8px; padding:12px; margin-bottom:10px; }
   .node-card h3 { margin:0 0 6px; font-size:14px; }
   .muted { color: var(--muted); font-size:12px; }
+  nav.tabbar { background: var(--card); border-bottom: 1px solid var(--border); padding: 0 20px; display:flex; gap:4px; }
+  nav.tabbar .tab-btn { background:transparent; border:none; color: var(--muted); padding:12px 16px; cursor:pointer; font-weight:600; font-size:14px; border-bottom:2px solid transparent; }
+  nav.tabbar .tab-btn:hover { color: var(--fg); }
+  nav.tabbar .tab-btn.active { color: var(--fg); border-bottom-color: var(--accent); }
+  #cameraImageWrap { position:relative; display:inline-block; max-width:100%; background:#000; border-radius:8px; overflow:hidden; line-height:0; }
+  #cameraImage { display:block; max-width:100%; height:auto; }
+  #rulerCanvas { position:absolute; left:0; top:0; cursor:crosshair; }
 </style>
 </head>
 <body>
@@ -1167,7 +1174,12 @@ function dashboardHtml(): string {
     <button class="secondary" id="logoutBtn">Sign out</button>
   </div>
 </header>
+<nav class="tabbar">
+  <button class="tab-btn active" data-tab="overview">Overview</button>
+  <button class="tab-btn" data-tab="camera">Camera</button>
+</nav>
 <main>
+<div id="tab-overview" class="tab-panel">
   <div class="stats" id="stats"></div>
 
   <section>
@@ -1219,6 +1231,32 @@ function dashboardHtml(): string {
       <tbody id="userRows"></tbody>
     </table>
   </section>
+</div>
+
+<div id="tab-camera" class="tab-panel" style="display:none">
+  <section>
+    <h2>Camera snapshot &amp; pixel ruler</h2>
+    <p class="muted">Not a live video stream &mdash; the device can't be reached directly, so this shows the latest uploaded photo and auto-refreshes every 10s. Use "Capture now" to force a fresh shot, then click two points on a known reference (e.g. a tape measure) and enter the real-world distance to compute mm/pixel.</p>
+    <div class="row" style="margin-bottom:12px">
+      <select id="cameraNodeSelect"></select>
+      <button id="cameraCaptureBtn">Capture now</button>
+      <label class="muted" style="display:flex; align-items:center; gap:6px">
+        <input type="checkbox" id="cameraAutoRefresh" checked> Auto-refresh (10s)
+      </label>
+      <button class="secondary" id="rulerClearBtn">Clear ruler</button>
+    </div>
+    <div id="cameraImageWrap">
+      <img id="cameraImage">
+      <canvas id="rulerCanvas"></canvas>
+    </div>
+    <div class="stats" style="margin-top:16px">
+      <div class="stat-card"><div class="label">Capture time (Bangkok)</div><div class="value" id="cameraCapturedAt" style="font-size:15px">-</div></div>
+      <div class="stat-card"><div class="label">Pixel distance</div><div class="value" id="rulerPixels">-</div></div>
+      <div class="stat-card"><div class="label">Real distance</div><div class="value" id="rulerRealDistance">-</div></div>
+      <div class="stat-card"><div class="label">GSD (mm/pixel)</div><div class="value" id="rulerGsd">-</div></div>
+    </div>
+  </section>
+</div>
 </main>
 </div>
 
@@ -1289,6 +1327,174 @@ document.getElementById("exportBtn").onclick = () => {
   const params = captureFilterParams();
   window.location.href = "/v1/export?" + params.toString();
 };
+
+function switchTab(tab) {
+  document.querySelectorAll(".tab-btn").forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === tab));
+  document.getElementById("tab-overview").style.display = tab === "overview" ? "block" : "none";
+  document.getElementById("tab-camera").style.display = tab === "camera" ? "block" : "none";
+  if (tab === "camera") {
+    populateCameraNodeSelect().then(loadCameraSnapshot);
+    startCameraAutoRefresh();
+  } else {
+    stopCameraAutoRefresh();
+  }
+}
+document.querySelectorAll(".tab-btn").forEach((btn) => {
+  btn.onclick = () => switchTab(btn.dataset.tab);
+});
+
+let cameraNodeId = null;
+let lastCameraCaptureId = null;
+let cameraAutoRefreshTimer = null;
+let rulerPoints = [];
+
+function startCameraAutoRefresh() {
+  stopCameraAutoRefresh();
+  if (!document.getElementById("cameraAutoRefresh").checked) return;
+  cameraAutoRefreshTimer = setInterval(loadCameraSnapshot, 10000);
+}
+function stopCameraAutoRefresh() {
+  if (cameraAutoRefreshTimer) {
+    clearInterval(cameraAutoRefreshTimer);
+    cameraAutoRefreshTimer = null;
+  }
+}
+document.getElementById("cameraAutoRefresh").onchange = () => {
+  if (document.getElementById("cameraAutoRefresh").checked) startCameraAutoRefresh();
+  else stopCameraAutoRefresh();
+};
+
+async function populateCameraNodeSelect() {
+  const response = await api("/v1/nodes");
+  const data = await response.json();
+  const select = document.getElementById("cameraNodeSelect");
+  select.innerHTML = data.nodes.map((n) => \`<option value="\${escapeHtml(n.node_id)}">\${escapeHtml(n.node_id)}</option>\`).join("");
+  if (data.nodes.length && !cameraNodeId) cameraNodeId = data.nodes[0].node_id;
+  if (cameraNodeId) select.value = cameraNodeId;
+}
+document.getElementById("cameraNodeSelect").onchange = (event) => {
+  cameraNodeId = event.target.value;
+  lastCameraCaptureId = null;
+  loadCameraSnapshot();
+};
+
+document.getElementById("cameraCaptureBtn").onclick = async () => {
+  if (!cameraNodeId) {
+    alert("No camera node available yet.");
+    return;
+  }
+  const response = await api("/v1/cmd", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ node_id: cameraNodeId, command: "capture_now" }),
+  });
+  if (response.ok) {
+    alert("capture_now queued. The new photo should appear here within about 30 seconds.");
+  } else {
+    const data = await response.json().catch(() => ({}));
+    alert(data.error || "failed to queue command");
+  }
+};
+
+async function loadCameraSnapshot() {
+  if (!cameraNodeId) {
+    await populateCameraNodeSelect();
+    if (!cameraNodeId) return;
+  }
+  const response = await api("/v1/captures?node=" + encodeURIComponent(cameraNodeId) + "&limit=1");
+  const data = await response.json();
+  if (!data.captures.length) return;
+  const capture = data.captures[0];
+  if (capture.capture_id === lastCameraCaptureId) return;
+  lastCameraCaptureId = capture.capture_id;
+  const imageResponse = await api("/v1/image/" + encodeURIComponent(capture.capture_id));
+  const blob = await imageResponse.blob();
+  const url = URL.createObjectURL(blob);
+  const img = document.getElementById("cameraImage");
+  img.onload = () => {
+    rulerPoints = [];
+    sizeRulerCanvas();
+    resetRulerReadout();
+  };
+  img.src = url;
+  document.getElementById("cameraCapturedAt").textContent = bangkokTime(capture.captured_at);
+}
+
+function sizeRulerCanvas() {
+  const img = document.getElementById("cameraImage");
+  const canvas = document.getElementById("rulerCanvas");
+  canvas.width = img.clientWidth;
+  canvas.height = img.clientHeight;
+  canvas.style.width = img.clientWidth + "px";
+  canvas.style.height = img.clientHeight + "px";
+  redrawRuler();
+}
+window.addEventListener("resize", () => {
+  if (document.getElementById("cameraImage").src) sizeRulerCanvas();
+});
+
+function redrawRuler() {
+  const canvas = document.getElementById("rulerCanvas");
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = "#ffd400";
+  ctx.fillStyle = "#ffd400";
+  ctx.lineWidth = 2;
+  for (const p of rulerPoints) {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  if (rulerPoints.length === 2) {
+    ctx.beginPath();
+    ctx.moveTo(rulerPoints[0].x, rulerPoints[0].y);
+    ctx.lineTo(rulerPoints[1].x, rulerPoints[1].y);
+    ctx.stroke();
+  }
+}
+
+function resetRulerReadout() {
+  document.getElementById("rulerPixels").textContent = "-";
+  document.getElementById("rulerRealDistance").textContent = "-";
+  document.getElementById("rulerGsd").textContent = "-";
+}
+
+document.getElementById("rulerCanvas").addEventListener("click", (event) => {
+  const rect = event.target.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  if (rulerPoints.length >= 2) rulerPoints = [];
+  rulerPoints.push({ x, y });
+  redrawRuler();
+  if (rulerPoints.length === 2) computeRuler();
+});
+
+document.getElementById("rulerClearBtn").onclick = () => {
+  rulerPoints = [];
+  redrawRuler();
+  resetRulerReadout();
+};
+
+function computeRuler() {
+  const img = document.getElementById("cameraImage");
+  const scaleX = img.naturalWidth / img.clientWidth;
+  const scaleY = img.naturalHeight / img.clientHeight;
+  const [p1, p2] = rulerPoints;
+  const dx = (p2.x - p1.x) * scaleX;
+  const dy = (p2.y - p1.y) * scaleY;
+  const pixelDistance = Math.sqrt(dx * dx + dy * dy);
+  document.getElementById("rulerPixels").textContent = pixelDistance.toFixed(1) + " px";
+  const cmInput = prompt("Real-world distance between the two points, in centimeters:", "10");
+  const cm = Number(cmInput);
+  if (!cmInput || !Number.isFinite(cm) || cm <= 0) {
+    document.getElementById("rulerRealDistance").textContent = "-";
+    document.getElementById("rulerGsd").textContent = "-";
+    return;
+  }
+  const mmPerPixel = (cm * 10) / pixelDistance;
+  document.getElementById("rulerRealDistance").textContent = cm + " cm";
+  document.getElementById("rulerGsd").textContent = mmPerPixel.toFixed(3) + " mm/px";
+}
 document.getElementById("modal").onclick = () => { document.getElementById("modal").style.display = "none"; };
 
 function bangkokTime(iso) {
@@ -1547,7 +1753,9 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/") {
-      return new Response(landingHtml(), { headers: { "content-type": "text/html; charset=utf-8" } });
+      return new Response(landingHtml(), {
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+      });
     }
     if (request.method === "GET" && url.pathname === "/api") {
       return json({
@@ -1566,7 +1774,9 @@ export default {
     }
     if (request.method === "GET" && url.pathname === "/healthz") return json({ status: "ok" });
     if (request.method === "GET" && url.pathname === "/dashboard") {
-      return new Response(dashboardHtml(), { headers: { "content-type": "text/html; charset=utf-8" } });
+      return new Response(dashboardHtml(), {
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+      });
     }
     if (request.method === "POST" && url.pathname === "/auth/bootstrap") {
       try {
